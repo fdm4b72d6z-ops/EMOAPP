@@ -1,0 +1,162 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#17134b">
+<title>EMO - Chat Connect Call</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#100f2b;color:white;font-family:Arial,sans-serif}
+header{padding:25px;background:linear-gradient(120deg,#633cff,#087cf5);font-size:30px;font-weight:bold}
+main{max-width:500px;margin:auto;padding:20px}
+input{width:100%;padding:15px;margin:8px 0;background:#201e43;border:1px solid #514a86;border-radius:12px;color:white;font-size:16px}
+button{padding:13px 18px;border:0;border-radius:12px;background:#6645ff;color:white;font-weight:bold;margin:5px 3px}
+#messages{height:40vh;overflow:auto;background:#191735;padding:12px;border-radius:15px}
+.msg{background:#34305d;padding:12px;margin:8px 0;border-radius:13px;overflow-wrap:anywhere}
+.mine{background:#5541dd;margin-left:30px}
+#chatArea{display:none}
+</style>
+</head>
+<body>
+<header>💬 EMO <small style="font-size:12px">Chat. Connect. Call.</small></header>
+<main>
+<section id="authArea">
+<h2>Welcome to EMO</h2>
+<input id="name" placeholder="Your name">
+<input id="email" type="email" placeholder="Email address">
+<input id="password" type="password" placeholder="Password">
+<button onclick="signup()">Create account</button>
+<button onclick="login()">Sign in</button>
+<p id="status">Welcome!</p>
+</section>
+
+<section id="chatArea">
+<h2 id="welcome">Your EMO chat</h2>
+<input id="searchUsers" placeholder="Search friends by name">
+<button onclick="findUsers()">Search friends</button>
+<div id="userResults"></div>
+<h3 id="chatTitle">Select a conversation</h3>
+<div id="messages"></div>
+<input id="message" placeholder="Write a message">
+<button onclick="sendMessage()">Send ➤</button>
+<button onclick="logout()">Log out</button>
+<p id="status2"></p>
+</section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+const SUPABASE_URL="YOUR_PROJECT_URL";
+const SUPABASE_KEY="YOUR_PUBLISHABLE_KEY";
+const db=supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
+
+let currentUser=null,chatId=null,liveChannel=null;
+
+async function signup(){
+const email=document.getElementById("email").value.trim();
+const password=document.getElementById("password").value;
+const name=document.getElementById("name").value.trim()||"EMO User";
+if(!email||password.length<6){statusText("Enter email and password of at least 6 characters.");return;}
+const {data,error}=await db.auth.signUp({email,password,options:{data:{display_name:name}}});
+if(error){statusText(error.message);return;}
+if(data.session){currentUser=data.user;await startApp();}
+else statusText("Check your email to confirm, then sign in.");
+}
+
+function statusText(t){document.getElementById("status").textContent=t;}
+
+async function login(){
+const {data,error}=await db.auth.signInWithPassword({
+email:document.getElementById("email").value.trim(),
+password:document.getElementById("password").value
+});
+if(error){statusText(error.message);return;}
+currentUser=data.user;
+await startApp();
+}
+
+async function startApp(){
+document.getElementById("authArea").style.display="none";
+document.getElementById("chatArea").style.display="block";
+document.getElementById("welcome").textContent="Hello, "+(currentUser.user_metadata.display_name||"EMO User");
+document.getElementById("status2").textContent="Search for friends to chat.";
+}
+
+async function findUsers(){
+const q=document.getElementById("searchUsers").value.trim();
+const box=document.getElementById("userResults");
+box.replaceChildren();
+if(q.length<2){box.textContent="Enter at least 2 characters.";return;}
+const {data,error}=await db.from("profiles").select("id,display_name").ilike("display_name","%"+q+"%").neq("id",currentUser.id).limit(20);
+if(error){box.textContent=error.message;return;}
+if(!data.length){box.textContent="No users found.";return;}
+data.forEach(user=>{
+const b=document.createElement("button");
+b.textContent="Chat with "+user.display_name;
+b.onclick=()=>startPrivateChat(user.id,user.display_name);
+box.appendChild(b);
+});
+}
+
+async function startPrivateChat(userId,name){
+const {data,error}=await db.rpc("create_emo_conversation",{
+p_member_ids:[userId],p_is_group:false,p_name:null
+});
+if(error){alert(error.message);return;}
+chatId=data;
+document.getElementById("chatTitle").textContent="Chat with "+name;
+await loadMessages();
+subscribeMessages();
+}
+
+async function loadMessages(){
+const {data,error}=await db.from("messages").select("*").eq("conversation_id",chatId).order("created_at");
+if(error){document.getElementById("status2").textContent=error.message;return;}
+const box=document.getElementById("messages");
+box.replaceChildren();
+data.forEach(showMessage);
+}
+
+function showMessage(m){
+const item=document.createElement("div");
+item.className="msg"+(m.sender_id===currentUser.id?" mine":"");
+item.textContent=m.content||"Attachment";
+document.getElementById("messages").appendChild(item);
+}
+
+async function sendMessage(){
+const input=document.getElementById("message");
+const content=input.value.trim();
+if(!content||!chatId)return;
+const {error}=await db.from("messages").insert({
+conversation_id:chatId,sender_id:currentUser.id,content
+});
+if(error){document.getElementById("status2").textContent=error.message;return;}
+input.value="";
+}
+
+function subscribeMessages(){
+if(liveChannel)db.removeChannel(liveChannel);
+liveChannel=db.channel("emo-"+chatId).on("postgres_changes",{
+event:"INSERT",schema:"public",table:"messages",
+filter:"conversation_id=eq."+chatId
+},payload=>showMessage(payload.new)).subscribe();
+}
+
+async function logout(){
+if(liveChannel)await db.removeChannel(liveChannel);
+await db.auth.signOut();
+currentUser=null;chatId=null;
+document.getElementById("chatArea").style.display="none";
+document.getElementById("authArea").style.display="block";
+statusText("You have signed out.");
+}
+
+db.auth.getSession().then(async ({data})=>{
+if(data.session){currentUser=data.session.user;await startApp();}
+});
+</script>
+</body>
+</html>
